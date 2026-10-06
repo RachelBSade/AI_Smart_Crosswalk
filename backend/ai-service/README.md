@@ -1,67 +1,78 @@
-# AI service — detection + video risk analysis
+# SafeCross – AI Service
 
-Python side of the Smart Crosswalk backend. Two ways to use it:
+Python service that analyses video from a crosswalk camera, detects dangerous pedestrian behaviour and sends alerts to the backend.
 
-| Entry point | What it does | Sprint |
-|---|---|---|
-| `app.py` | FastAPI server: `GET /` health, `POST /detect {imagePath}` -> YOLO detections for ONE image | 4 (Yossef) |
-| `main.py` | Analyse a **video file**: YOLO per frame -> track each person -> classify into one of the 12 agreed risk cases -> POST the alert to the Node backend | 4 point 1 (Liel) |
+## Pipeline
 
-## Setup (once)
+```
+video ─> frame (1 of every N) ─> detector ─> tracker ─> risk rules ─> alert sender ─> POST /api/alerts
+                                 YOLOv8      stable ID   17 cases      background queue
+                                             per person  Low/Med/High  + x-api-key
+```
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `main.py` | Command-line entry point for video analysis |
+| `video_processor.py` | The main loop: reads frames and runs the pipeline |
+| `detector.py` | YOLOv8 wrapper: persons, vehicles, bicycles, motorcycles, phones |
+| `tracker.py` | Gives each person a stable ID across frames (built-in tracker or ByteTrack) |
+| `risk_rules.py` | Computes distance, speed and direction for each person and classifies the behaviour into one of 17 risk cases |
+| `alert_sender.py` | Sends alerts to the backend on a background thread; retries once without the image |
+| `config.py` | Every tunable value: model, thresholds, crosswalk zone, backend address |
+| `calibrate.py` | Computes the adult height reference for a camera, used to tell children from adults |
+| `verify_setup.py` | Checks that YOLO and OpenCV are installed correctly |
+| `app.py` | FastAPI server: `GET /` health check and `POST /detect` for a single image |
+| [`tests/`](tests) | Unit tests |
+
+## Setup
 
 ```bash
-cd backend/ai-service
 python -m venv venv
-venv\Scripts\activate            # Windows   (macOS/Linux: source venv/bin/activate)
-pip install -r requirements.txt  # ultralytics pulls PyTorch (~2 GB)
+venv\Scripts\activate            # macOS / Linux: source venv/bin/activate
+pip install -r requirements.txt
 python verify_setup.py --no-window
 ```
+
+The YOLO weights file (`yolov8n.pt`) is downloaded automatically on the first run if it is missing.
 
 ## Analyse a video
 
 ```bash
-python main.py --source samples/clip1.mp4            # analyse + POST alerts to http://localhost:3000/api/alerts
-python main.py --source samples/clip1.mp4 --no-api   # analyse only, print verdicts + JSON summary
-python main.py --source samples/clip1.mp4 --show     # also open a window (boxes + edge zone), 'q' quits
+python main.py --source path/to/video.mp4            # analyse and send alerts to the backend
+python main.py --source path/to/video.mp4 --no-api   # analyse only, print the results
+python main.py --source path/to/video.mp4 --show     # also open a window with boxes and the crosswalk zone
 python main.py --source 0                            # webcam
-python main.py --source clip.mp4 --every 2 --crosswalk cw_002 --camera cam_201 --tracker yolo
 ```
 
-Flags: `--every N` analyse 1 of N frames, `--crosswalk` / `--camera` ids stored on the alerts,
-`--tracker simple|yolo`, `--show`, `--no-api`.
-
-The Node backend (`npm start` in `backend/`) must be running for alerts to be saved; the
-Python side never blocks on the network (background sender, Rachel's Sprint 3 design).
-
-## How the video pipeline works
-
-```
-video ──> frame (1 of every N) ──> detector.py (YOLOv8) ──> tracker.py ──> risk_rules.py ──> alert_sender.py ──> POST /api/alerts
-                                    persons, phones          who is who     which of the 12 cases   Rachel's createAlert:
-                                                             across frames  Low / Medium / High     Cloudinary, MongoDB, Socket.io
-```
-
-| File | Role |
+| Flag | Meaning |
 |---|---|
-| `config.py` | every tunable number, with comments (video, tracking, rule thresholds, backend URL) |
-| `detector.py` | Rachel + Yossef's merged YOLO wrapper, unchanged |
-| `tracker.py` | stable person ids across frames (`SimpleTracker`, or ultralytics ByteTrack with `--tracker yolo`) |
-| `risk_rules.py` | the brain: distance to the edge zone, speed, direction, phone, child -> 12 cases |
-| `alert_sender.py` | background POST with Rachel's alert schema; retries once without the image |
-| `video_processor.py` | the loop (restored from Rachel's Sprint 3 and adapted) |
-| `main.py` | CLI |
+| `--every N` | Analyse 1 of every N frames |
+| `--crosswalk`, `--camera` | IDs stored on the alerts (the `_id` values from MongoDB) |
+| `--tracker simple\|yolo` | Built-in tracker, or ByteTrack |
+| `--show` | Open a preview window |
+| `--no-api` | Do not send alerts |
 
-Units inside the rules: distances in **body heights (h)**, speeds in **h/s**, so the same
-thresholds work at any resolution and distance from the camera. Metres are only sent when
-`config.METERS_PER_H` is calibrated for the camera; until then those fields are `null`.
+The backend must be running for alerts to be saved, and `SENSOR_API_KEY` must match the backend's value. The key is read from the environment, or from `backend/.env`.
 
-The edge zone is `config.ROI_POLYGON_NORM` (Rachel's polygon). It must be adjusted per camera.
-
-## Tests (no YOLO needed)
+## Run the detection server
 
 ```bash
-venv\Scripts\python -m unittest discover -s tests -t . -v
+uvicorn app:app --port 8000
 ```
 
-One test per risk case, tracker behaviour, and a synthetic video end-to-end with a
-colour-based stand-in for YOLO. Python 3.10+.
+## How the rules work
+
+- Distances are measured in **body heights (h)** and speeds in **h/s**, so the same thresholds work at any resolution and any distance from the camera.
+- The crosswalk zone is a polygon in normalized coordinates (`ROI_POLYGON_NORM` in `config.py`). It must be adjusted for each camera.
+- When several rules match one person, a priority list picks the most severe.
+- Low cases are only logged. Medium and High cases also set `ledTriggered`.
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -t . -v
+```
+
+The tests do not need YOLO or a GPU.
