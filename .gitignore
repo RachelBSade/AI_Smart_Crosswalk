@@ -137,3 +137,15 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Local-only files (not part of the repo)
+err.txt
+SafeCross_docs.zip
+sprints/
+merge-sandbox/
+Claude outputs/
+.claude/
+
+# Project documents: only PDFs are published
+docs/*.docx
+docs/*.pptx
